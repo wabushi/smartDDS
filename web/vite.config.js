@@ -280,11 +280,18 @@ function ddsRegistry() {
         if (request.headers['content-length']) {
           upstreamHeaders['content-length'] = request.headers['content-length'];
         }
+        const requestPath = typeof request.url === 'string' ? request.url : '/';
+        const upstreamPath = requestPath.startsWith('/dds-api/')
+          ? requestPath.slice('/dds-api'.length)
+          : requestPath.startsWith('/dds-api')
+            ? requestPath.slice('/dds-api'.length) || '/'
+            : requestPath;
+
         const proxy = http.request({
           hostname: active.ip,
           port: 80,
           method: request.method,
-          path: request.url,
+          path: upstreamPath,
           headers: upstreamHeaders,
           timeout: 4000,
         }, upstream => {
@@ -293,7 +300,11 @@ function ddsRegistry() {
           upstream.pipe(response);
         });
         proxy.on('timeout', () => proxy.destroy(new Error('ESP32 request timed out')));
-        proxy.on('error', error => json(response, 502, { ok: false, error: error.message }));
+        proxy.on('error', error => {
+          console.error(`[DDS] ${request.method} ${upstreamPath} -> ${active.ip}:80 failed: ${error.message}`);
+          if (!response.headersSent) json(response, 502, { ok: false, error: error.message });
+          else response.end();
+        });
         request.pipe(proxy);
       });
     },
