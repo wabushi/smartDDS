@@ -798,10 +798,10 @@ function App() {
     }
   };
   const pushEnabled = wifiControlAvailable && window.isSecureContext && notificationHoursValid && !pushBusy;
-  const wifiAttempting = !wifiControlAvailable && (wifiChecking || Boolean(reportedWifi?.configured));
-  const wifiIndicatorMode = wifiControlAvailable ? 'connected' : wifiAttempting ? 'connecting' : 'offline';
-  const wifiIndicatorText = wifiControlAvailable
-    ? `Wi-Fi connected${reportedWifi?.ssid ? ` · ${reportedWifi.ssid}` : ''}${reportedWifi?.ip ? ` · ${reportedWifi.ip}` : ''}`
+  const wifiAttempting = !wifiConnected && !wifiControlAvailable && (wifiChecking || Boolean(reportedWifi?.configured));
+  const wifiIndicatorMode = wifiControlAvailable ? 'connected' : wifiConnected ? 'connecting' : wifiAttempting ? 'connecting' : 'offline';
+  const wifiIndicatorText = wifiConnected
+    ? `Wi-Fi connected${reportedWifi?.ssid ? ` · ${reportedWifi.ssid}` : ''}${reportedWifi?.ip ? ` · ${reportedWifi.ip}` : ''}${wifiControlAvailable ? '' : ' · control route unavailable'}`
     : wifiAttempting
       ? `Wi-Fi connecting${reportedWifi?.ssid ? ` · ${reportedWifi.ssid}` : ''}…`
       : 'Wi-Fi not configured';
