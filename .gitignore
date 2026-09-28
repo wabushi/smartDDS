@@ -1,0 +1,31 @@
+# ESP-IDF generated output and local configuration
+build/
+sdkconfig
+
+# JavaScript dependencies and build output
+**/node_modules/
+**/dist/
+**/.vite/
+
+# Local environment and runtime state
+**/.env
+**/.env.*
+!**/.env.example
+**/.runtime/
+*.log
+*.pid
+
+# Local TLS certificates and private keys
+.local-certs/
+**/certs/*-key.pem
+**/certs/*-cert.pem
+*.key
+*.pem
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+
+# Git metadata fallback used when the desktop .git mount is present
+.git-data/
