@@ -17,4 +17,4 @@
  * control server. A URL supplied during BLE provisioning replaces this value.
  * Keeping a default also migrates credentials saved by older firmware, which
  * did not store a server URL. */
-#define WIFI_DEFAULT_SERVER_URL "http://192.168.50.180:5175"
+#define WIFI_DEFAULT_SERVER_URL "https://smartdds.erezh.com"

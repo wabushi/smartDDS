@@ -9,6 +9,9 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+extern const uint8_t isrg_root_x1_pem_start[] asm("_binary_isrg_root_x1_pem_start");
+extern const uint8_t isrg_root_x1_pem_end[] asm("_binary_isrg_root_x1_pem_end");
 #include "nvs.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -121,6 +124,11 @@ static bool report_connection(void)
         .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 3000,
+        .buffer_size = 1024,
+        .buffer_size_tx = 1024,
+        .keep_alive_enable = false,
+        .cert_pem = (const char *)isrg_root_x1_pem_start,
+        .cert_len = (size_t)(isrg_root_x1_pem_end - isrg_root_x1_pem_start),
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {

@@ -103,6 +103,8 @@ function App() {
   const [wifiSaving, setWifiSaving] = useState(false);
   const [wifiReachable, setWifiReachable] = useState(false);
   const [wifiChecking, setWifiChecking] = useState(true);
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [isInstalled, setIsInstalled] = useState(false);
   const [serverWifi, setServerWifi] = useState(null);
   const chars = useRef({});
   const sendChain = useRef(Promise.resolve());
@@ -581,6 +583,37 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    setIsInstalled(standalone);
+
+    const onBeforeInstallPrompt = event => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    const onAppInstalled = () => {
+      setIsInstalled(true);
+      setInstallPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+    window.addEventListener('appinstalled', onAppInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', onAppInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return undefined;
+    navigator.serviceWorker.register(SERVICE_WORKER_URL, {
+      scope: '/',
+      type: 'classic',
+      updateViaCache: 'none'
+    }).catch(() => {});
+    return undefined;
+  }, []);
+
+  useEffect(() => {
     if (!state?.wifi?.ssid) return;
     setWifiSsid(state.wifi.ssid);
     try { localStorage.setItem(WIFI_SSID_STORAGE_KEY, state.wifi.ssid); } catch (_) { /* optional convenience only */ }
@@ -848,8 +881,17 @@ function App() {
     setSelectedOutput(output);
     if (controlsEnabled) void send({ cmd: 'select_output', output });
   };
+
+  const installApp = async () => {
+    if (!installPrompt) return;
+    const promptEvent = installPrompt;
+    setInstallPrompt(null);
+    await promptEvent.prompt();
+    await promptEvent.userChoice;
+  };
+
   return <main>
-    <header><div><span className="eyebrow">SMARTDDS / LOCAL CONTROL</span><h1>AD9834 <span>controller</span></h1><small className="build-id">Mobile push persistence build 2026-08-30.5</small></div><div className="transport-cluster"><div className="header-actions"><button onClick={connect} className={`icon-button transport-button ble-indicator ${bleControlAvailable ? 'connected' : ''}`} aria-label="Bluetooth connect" title={bleControlAvailable ? 'Bluetooth connected' : 'Connect Bluetooth'}><span>BT</span><i className="status-dot" /></button><button onClick={openWifiSettings} className={`icon-button transport-button wifi-indicator ${wifiIndicatorMode}`} aria-label="Wi-Fi settings" title={wifiIndicatorText}><span>WiFi</span><i className="status-dot" /></button></div><small className={`transport-readout ${wifiIndicatorMode}`} role="status" aria-live="polite">{wifiIndicatorText}</small></div></header>
+    <header><div><span className="eyebrow">SMARTDDS / LOCAL CONTROL</span><h1>AD9834 <span>controller</span></h1><small className="build-id">Mobile push persistence build 2026-08-30.5</small></div><div className="transport-cluster"><div className="header-actions">{installPrompt && !isInstalled && <button onClick={installApp} className="install-button" type="button" aria-label="Install SmartDDS app">Install</button>}<button onClick={connect} className={`icon-button transport-button ble-indicator ${bleControlAvailable ? 'connected' : ''}`} aria-label="Bluetooth connect" title={bleControlAvailable ? 'Bluetooth connected' : 'Connect Bluetooth'}><span>BT</span><i className="status-dot" /></button><button onClick={openWifiSettings} className={`icon-button transport-button wifi-indicator ${wifiIndicatorMode}`} aria-label="Wi-Fi settings" title={wifiIndicatorText}><span>WiFi</span><i className="status-dot" /></button></div><small className={`transport-readout ${wifiIndicatorMode}`} role="status" aria-live="polite">{wifiIndicatorText}</small></div></header>
     <section className="mobile-push-card" aria-label="Usage notification settings">
       <h2>Usage notification</h2>
       <label className="notification-delay"><span>Notify after consecutive usage</span><span className="hours-input"><input type="number" min="0.1" max={MAX_NOTIFICATION_HOURS} step="0.1" inputMode="decimal" value={notificationHours} aria-label="Notification delay in hours" aria-invalid={!notificationHoursValid} onChange={event => updateNotificationHours(event.target.value)} /><strong>hours</strong></span></label>

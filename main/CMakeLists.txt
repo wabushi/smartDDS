@@ -10,7 +10,8 @@ idf_component_register(
         "display/display.c" "display/display_ui.c" "display/display_hw.c"
         "display/splash_bitmap.c"
     INCLUDE_DIRS "."
-    REQUIRES driver nvs_flash bt esp_wifi esp_event esp_netif esp_http_server esp_http_client
+    EMBED_TXTFILES "certs/isrg_root_x1.pem"
+    REQUIRES driver nvs_flash bt esp_wifi esp_event esp_netif esp_http_server esp_http_client mbedtls
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror=return-type)
