@@ -540,7 +540,7 @@ function App() {
     }
     setWifiSaving(true);
     try {
-      const serverUrl = `http://${window.location.hostname}:5175`;
+    const serverUrl = window.location.origin;
       const ok = await sendBluetooth({ cmd: 'set_wifi', ssid, password: wifiPassword, server_url: serverUrl, connect: true });
       if (ok) {
         setWifiSsid(ssid);
