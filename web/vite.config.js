@@ -300,15 +300,30 @@ function ddsRegistry() {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), ddsRegistry()],
-  server: {
-    host: '0.0.0.0',
-    port: 5174,
-    https: {
-      // Keep private TLS material outside Vite's served project root.
-      key: fs.readFileSync(new URL('../.local-certs/lan-key.pem', import.meta.url)),
-      cert: fs.readFileSync(new URL('../.local-certs/lan-cert.pem', import.meta.url))
-    }
+function localHttpsConfig() {
+  const keyUrl = new URL('../.local-certs/lan-key.pem', import.meta.url);
+  const certUrl = new URL('../.local-certs/lan-cert.pem', import.meta.url);
+
+  if (!fs.existsSync(keyUrl) || !fs.existsSync(certUrl)) {
+    return undefined;
   }
+
+  // Keep private TLS material outside Vite's served project root.
+  return {
+    key: fs.readFileSync(keyUrl),
+    cert: fs.readFileSync(certUrl)
+  };
+}
+
+export default defineConfig(({ command }) => {
+  const https = command === 'serve' ? localHttpsConfig() : undefined;
+
+  return {
+    plugins: [react(), ddsRegistry()],
+    server: {
+      host: '0.0.0.0',
+      port: 5174,
+      ...(https ? { https } : {})
+    }
+  };
 });
