@@ -37,11 +37,16 @@ webpush.setVapidDetails('mailto:smartdds@localhost', pushState.vapid.publicKey, 
 
 function ddsRegistry() {
   let device = null;
+  const commandQueue = [];
   let pollPromise = null;
   const candidates = new Set(configuredDeviceIps);
   const isIpv4 = value => /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value) &&
     value.split('.').every(part => Number(part) <= 255);
-  const current = () => device && Date.now() - device.lastSeen < 60000 ? device : null;
+  const current = () => {
+    if (!device) return null;
+    const maxAge = device.source === 'relay' ? 15000 : 60000;
+    return Date.now() - device.lastSeen < maxAge ? device : null;
+  };
   const json = (response, status, payload) => {
     response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     response.end(JSON.stringify(payload));
@@ -140,6 +145,7 @@ function ddsRegistry() {
   const pollCandidates = () => {
     if (pollPromise) return pollPromise;
     pollPromise = (async () => {
+      if (device?.source === 'relay' && current()) return device;
       for (const ip of candidates) {
         if (!isIpv4(ip)) continue;
         const found = await probe(ip);
@@ -158,7 +164,54 @@ function ddsRegistry() {
   return {
     name: 'smartdds-device-registry',
     configureServer(server) {
-      const registry = http.createServer((request, response) => {
+      const registry = http.createServer(async (request, response) => {
+        if (request.method === 'POST' && request.url === '/api/device/poll') {
+          try {
+            const report = await readJson(request);
+            if (!isIpv4(report.ip)) return json(response, 400, { ok: false, error: 'invalid device IP' });
+            candidates.add(report.ip);
+            const previous = device?.ip === report.ip ? device : null;
+            device = {
+              name: report.device || 'AD9834-DDS',
+              ip: report.ip,
+              lastSeen: Date.now(),
+              source: 'relay',
+              wifi: {
+                ...(previous?.wifi || {}),
+                ...(report.wifi || {}),
+                connected: report.connected !== false,
+                ip: report.ip,
+              },
+              state: report.state && typeof report.state === 'object'
+                ? report.state
+                : previous?.state || null,
+            };
+            if (report.result && typeof report.result === 'object')
+              console.log(`[DDS] ESP32 command result: ${JSON.stringify(report.result)}`);
+            void updateUsage(device.state);
+            const command = commandQueue.shift();
+            if (command) return json(response, 200, command);
+            response.writeHead(204, { 'Cache-Control': 'no-store' });
+            return response.end();
+          } catch (_) {
+            return json(response, 400, { ok: false, error: 'invalid JSON' });
+          }
+        }
+
+        if (request.method === 'POST' && request.url === '/api/command') {
+          try {
+            const command = await readJson(request);
+            if (!command || typeof command !== 'object' || Array.isArray(command))
+              return json(response, 400, { ok: false, error: 'invalid command' });
+            if (commandQueue.length >= 64)
+              return json(response, 503, { ok: false, error: 'command queue full' });
+            commandQueue.push(command);
+            return json(response, 202, { ok: true, queued: true });
+          } catch (_) {
+            return json(response, 400, { ok: false, error: 'invalid JSON' });
+          }
+        }
+
         if (request.method === 'POST' && request.url === '/api/device/register') {
           let body = '';
           request.on('data', chunk => {
@@ -286,6 +339,32 @@ function ddsRegistry() {
           : requestPath.startsWith('/dds-api')
             ? requestPath.slice('/dds-api'.length) || '/'
             : requestPath;
+
+        if (active.source === 'relay') {
+          const path = upstreamPath.split('?', 1)[0];
+          if (request.method === 'GET' && path === '/api/state') {
+            return json(response, 200, active.state || {
+              type: 'state',
+              wifi: active.wifi || { connected: true, ip: active.ip },
+            });
+          }
+          if (request.method === 'POST' && path === '/api/command') {
+            try {
+              const command = await readJson(request);
+              if (!command || typeof command !== 'object' || Array.isArray(command)) {
+                return json(response, 400, { ok: false, error: 'invalid command' });
+              }
+              if (commandQueue.length >= 64) {
+                return json(response, 503, { ok: false, error: 'command queue full' });
+              }
+              commandQueue.push(command);
+              return json(response, 202, { ok: true, queued: true });
+            } catch (_) {
+              return json(response, 400, { ok: false, error: 'invalid JSON' });
+            }
+          }
+          return json(response, 405, { ok: false, error: 'ESP32 control is available through the outbound relay only' });
+        }
 
         const proxy = http.request({
           hostname: active.ip,

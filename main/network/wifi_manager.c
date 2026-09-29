@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "config/board_config.h"
+#include "transport/command_api.h"
 #include "esp_event.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -20,14 +21,20 @@ extern const uint8_t isrg_root_x1_pem_end[] asm("_binary_isrg_root_x1_pem_end");
 static const char *TAG = "WIFI";
 static bool s_initialized, s_started, s_configured, s_connected;
 static char s_ssid[33], s_password[64], s_ip[16], s_server_url[128];
-static TaskHandle_t s_report_task;
+static TaskHandle_t s_relay_task;
 static esp_timer_handle_t s_reconnect_timer;
 static uint32_t s_reconnect_attempt;
 static bool s_reconfigure_pending;
+static char s_relay_response[2048];
+static size_t s_relay_response_len;
+static char s_relay_result[4096];
+static bool s_relay_result_pending;
+static char s_relay_state[4096];
+static char s_relay_body[12288];
 
-#define WIFI_REPORT_INTERVAL_MS 30000
-#define WIFI_REPORT_FAILURE_INTERVAL_MS 300000
-#define WIFI_REPORT_TASK_STACK 4096
+#define WIFI_RELAY_INTERVAL_MS 2000U
+#define WIFI_RELAY_FAILURE_INTERVAL_MS 5000U
+#define WIFI_RELAY_TASK_STACK 8192U
 #define WIFI_RECONNECT_MIN_MS 500U
 #define WIFI_RECONNECT_MAX_MS 10000U
 
@@ -102,66 +109,108 @@ static void schedule_reconnect(uint32_t delay_ms)
     if (err != ESP_OK) ESP_LOGW(TAG, "Unable to schedule reconnect: %s", esp_err_to_name(err));
 }
 
-static bool report_connection(void)
+static esp_err_t relay_http_event_handler(esp_http_client_event_t *event)
+{
+    if (event != NULL && event->event_id == HTTP_EVENT_ON_DATA &&
+        event->data != NULL && event->data_len > 0) {
+        size_t remaining = sizeof(s_relay_response) - 1U - s_relay_response_len;
+        size_t copy = (size_t)event->data_len < remaining ?
+                      (size_t)event->data_len : remaining;
+        if (copy > 0) {
+            memcpy(s_relay_response + s_relay_response_len, event->data, copy);
+            s_relay_response_len += copy;
+            s_relay_response[s_relay_response_len] = '\0';
+        }
+    }
+    return ESP_OK;
+}
+
+static bool relay_poll(void)
 {
     char url[192];
-    char body[128];
     if (!s_connected || s_server_url[0] == '\0' || s_ip[0] == '\0') return false;
 
     const bool trailing_slash = s_server_url[strlen(s_server_url) - 1] == '/';
-    int url_len = snprintf(url, sizeof(url), "%s%sapi/device/register",
+    int url_len = snprintf(url, sizeof(url), "%s%sapi/device/poll",
                            s_server_url, trailing_slash ? "" : "/");
-    int body_len = snprintf(body, sizeof(body),
-                            "{\"device\":\"AD9834-DDS\",\"ip\":\"%s\",\"connected\":true}",
-                            s_ip);
+    int state_len = command_api_get_state_json(s_relay_state, sizeof(s_relay_state));
+    if (state_len < 0 || (size_t)state_len >= sizeof(s_relay_state)) {
+        ESP_LOGE(TAG, "Unable to serialize DDS state for relay");
+        return false;
+    }
+    const char *result_json = s_relay_result_pending ? s_relay_result : NULL;
+    int body_len = snprintf(s_relay_body, sizeof(s_relay_body),
+                            "{\"device\":\"AD9834-DDS\",\"ip\":\"%s\","
+                            "\"connected\":true,\"wifi\":{\"connected\":true,\"ip\":\"%s\"},"
+                            "\"state\":%s%s%s}",
+                            s_ip, s_ip, s_relay_state,
+                            result_json != NULL ? ",\"result\":" : "",
+                            result_json != NULL ? result_json : "");
     if (url_len < 0 || (size_t)url_len >= sizeof(url) ||
-        body_len < 0 || (size_t)body_len >= sizeof(body)) {
-        ESP_LOGE(TAG, "Wi-Fi server registration payload is too long");
+        body_len < 0 || (size_t)body_len >= sizeof(s_relay_body)) {
+        ESP_LOGE(TAG, "Wi-Fi relay payload is too long");
         return false;
     }
 
+    s_relay_response_len = 0;
+    s_relay_response[0] = '\0';
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-        .buffer_size = 1024,
-        .buffer_size_tx = 1024,
+        .timeout_ms = 5000,
+        .buffer_size = sizeof(s_relay_response),
+        .buffer_size_tx = sizeof(s_relay_body),
         .keep_alive_enable = false,
         .cert_pem = (const char *)isrg_root_x1_pem_start,
         .cert_len = (size_t)(isrg_root_x1_pem_end - isrg_root_x1_pem_start),
+        .event_handler = relay_http_event_handler,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
-        ESP_LOGE(TAG, "Unable to create server registration client");
+        ESP_LOGE(TAG, "Unable to create Wi-Fi relay client");
         return false;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, body_len);
+    esp_http_client_set_post_field(client, s_relay_body, body_len);
     esp_err_t err = esp_http_client_perform(client);
-    bool reported = false;
+    bool relayed = false;
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
         if (status >= 200 && status < 300) {
-            ESP_LOGI(TAG, "Connection reported to server (%s)", s_server_url);
-            reported = true;
+            ESP_LOGI(TAG, "DDS relay poll succeeded (%d)", status);
+            relayed = true;
+            if (s_relay_result_pending) s_relay_result_pending = false;
+            const char *response = s_relay_response;
+            while (*response == ' ' || *response == '\t' ||
+                   *response == '\r' || *response == '\n') response++;
+            if (*response == '{') {
+                int result_len = command_api_execute_json(
+                    response, s_relay_result, sizeof(s_relay_result));
+                if (result_len >= 0 && (size_t)result_len < sizeof(s_relay_result)) {
+                    s_relay_result_pending = true;
+                    ESP_LOGI(TAG, "Applied command received through Wi-Fi relay");
+                } else {
+                    ESP_LOGW(TAG, "Relay command response was too large");
+                }
+            }
         } else {
-            ESP_LOGW(TAG, "Server registration returned HTTP %d", status);
+            ESP_LOGW(TAG, "Wi-Fi relay returned HTTP %d", status);
         }
     } else {
-        ESP_LOGW(TAG, "Unable to report connection to server: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Unable to poll Wi-Fi relay: %s", esp_err_to_name(err));
     }
     esp_http_client_cleanup(client);
-    return reported;
+    return relayed;
 }
 
-static void connection_report_task(void *arg)
+static void relay_task(void *arg)
 {
     (void)arg;
-    uint32_t interval_ms = WIFI_REPORT_INTERVAL_MS;
+    uint32_t interval_ms = WIFI_RELAY_INTERVAL_MS;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(interval_ms));
-        interval_ms = report_connection() ? WIFI_REPORT_INTERVAL_MS
-                                          : WIFI_REPORT_FAILURE_INTERVAL_MS;
+        interval_ms = relay_poll() ? WIFI_RELAY_INTERVAL_MS
+                                    : WIFI_RELAY_FAILURE_INTERVAL_MS;
     }
 }
 
@@ -224,7 +273,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             ESP_LOGI(TAG, "Wi-Fi power save mode=%d (%s)", power_save,
                      power_save == WIFI_PS_NONE ? "disabled" : "enabled");
         }
-        if (s_report_task != NULL) xTaskNotifyGive(s_report_task);
+        if (s_relay_task != NULL) xTaskNotifyGive(s_relay_task);
     }
 }
 
@@ -300,10 +349,10 @@ esp_err_t wifi_manager_init(void)
         ESP_LOGW(TAG, "Unable to read saved Wi-Fi credentials: %s", esp_err_to_name(err));
     }
     s_initialized = true;
-    if (xTaskCreate(connection_report_task, "wifi_report", WIFI_REPORT_TASK_STACK,
-                    NULL, 4, &s_report_task) != pdPASS) {
-        s_report_task = NULL;
-        ESP_LOGE(TAG, "Unable to start Wi-Fi server reporting task");
+    if (xTaskCreate(relay_task, "wifi_relay", WIFI_RELAY_TASK_STACK,
+                    NULL, 4, &s_relay_task) != pdPASS) {
+        s_relay_task = NULL;
+        ESP_LOGE(TAG, "Unable to start Wi-Fi outbound relay task");
         return ESP_ERR_NO_MEM;
     }
     if (s_configured) { ESP_LOGI(TAG, "Saved Wi-Fi credentials found; connecting"); return apply_config_and_connect(); }
@@ -348,7 +397,7 @@ esp_err_t wifi_manager_set_configuration(const char *ssid, const char *password,
     if (!connect) return ESP_OK;
     if (!credentials_changed && s_connected) {
         ESP_LOGI(TAG, "Control server updated without restarting Wi-Fi");
-        if (s_report_task != NULL) xTaskNotifyGive(s_report_task);
+        if (s_relay_task != NULL) xTaskNotifyGive(s_relay_task);
         return ESP_OK;
     }
     return apply_config_and_connect();

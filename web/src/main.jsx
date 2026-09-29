@@ -215,9 +215,18 @@ function App() {
         body: JSON.stringify(payload),
       });
       markWifiReachable();
-      handleMessage(message, true, true);
-      if (message?.ok !== false) setActionStatus(`Confirmed by ESP32 over Wi-Fi: ${commandLabel}`);
-      return message?.ok !== false;
+      if (message?.ok === false) {
+        handleMessage(message, false, true);
+        return false;
+      }
+      if (message?.queued) {
+        setActionStatus(`Queued for ESP32 over Wi-Fi: ${commandLabel}`);
+        addLog(`Queued ${commandLabel}; awaiting ESP32`);
+      } else {
+        handleMessage(message, true, true);
+        setActionStatus(`Confirmed by ESP32 over Wi-Fi: ${commandLabel}`);
+      }
+      return true;
     } catch (error) {
       markWifiFailure();
       const message = error?.name === 'AbortError' ? 'request timed out' : (error?.message || String(error));
